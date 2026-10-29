@@ -5399,11 +5399,9 @@ def _panel_banner_paste_avatar(base_img, avatar_img, cx=PANEL_BANNER_CX, cy=PANE
 
 
 async def build_panel_banner_image(client, user_id: int) -> str:
-    """بنر پنل با عکس پروفایل واقعی کاربر"""
-    from PIL import Image, ImageDraw
+    """بنر ثابت پنل — بدون پروفایل کاربر"""
     base_path = PANEL_BANNER_BASE
     if not base_path or not os.path.exists(base_path):
-        # جستجوی دوباره
         for _cand in (
             os.path.join(os.path.dirname(os.path.abspath(__file__)), "panel_banner_base.png"),
             "/app/panel_banner_base.png",
@@ -5416,76 +5414,23 @@ async def build_panel_banner_image(client, user_id: int) -> str:
         logging.warning("panel banner base missing: %s", base_path)
         return None
     try:
-        base = Image.open(base_path).convert("RGB")
-    except Exception as e:
-        logging.warning("panel banner open: %s", e)
-        return None
-
-    avatar = None
-    tmp_avatar = None
-    try:
-        # روش ۱: photo از get_me / get_users
-        try:
-            me = None
-            try:
-                me = await client.get_me()
-            except Exception:
-                me = None
-            u = me
-            if (not u) or (getattr(u, "id", None) != int(user_id)):
-                try:
-                    u = await client.get_users(int(user_id))
-                except Exception:
-                    u = me
-            if u and getattr(u, "photo", None):
-                fid = getattr(u.photo, "big_file_id", None) or getattr(u.photo, "small_file_id", None)
-                if fid:
-                    tmp_avatar = await client.download_media(fid, file_name=f"/tmp/panel_av_{user_id}.jpg")
-        except Exception as e:
-            logging.debug("panel avatar get_users photo: %s", e)
-
-        # روش ۲: get_chat_photos("me") — بهترین برای سلف
-        if not tmp_avatar or not os.path.exists(str(tmp_avatar)):
-            photos = []
-            for target in ("me", int(user_id)):
-                try:
-                    async for p in client.get_chat_photos(target, limit=1):
-                        photos.append(p)
-                        break
-                except Exception:
-                    continue
-                if photos:
-                    break
-            if photos:
-                tmp_avatar = await client.download_media(photos[0], file_name=f"/tmp/panel_av_{user_id}.jpg")
-
-        if tmp_avatar and os.path.exists(str(tmp_avatar)):
-            avatar = Image.open(tmp_avatar).convert("RGB")
-            logging.info("panel banner avatar OK uid=%s size=%s", user_id, avatar.size)
-        else:
-            logging.warning("panel banner avatar empty uid=%s", user_id)
-    except Exception as e:
-        logging.warning("panel banner avatar download: %s", e)
-
-    if avatar is None:
-        avatar = Image.new("RGB", (PANEL_BANNER_R * 2, PANEL_BANNER_R * 2), (30, 30, 50))
-        d = ImageDraw.Draw(avatar)
-        d.ellipse((20, 20, PANEL_BANNER_R * 2 - 20, PANEL_BANNER_R * 2 - 20), fill=(60, 60, 90))
-
-    try:
-        out = _panel_banner_paste_avatar(base, avatar)
+        # کپی موقت برای آپلود (اصلی دست نخورد)
         out_path = f"/tmp/panel_banner_{user_id}.jpg"
-        out.save(out_path, "JPEG", quality=92, optimize=True)
+        from PIL import Image
+        im = Image.open(base_path).convert("RGB")
+        im.save(out_path, "JPEG", quality=93, optimize=True)
         return out_path
     except Exception as e:
-        logging.warning("panel banner compose: %s", e)
-        return None
-    finally:
+        logging.warning("panel banner prepare file: %s", e)
+        # اگر PIL نبود همان فایل اصلی
         try:
-            if tmp_avatar and os.path.exists(str(tmp_avatar)):
-                os.remove(tmp_avatar)
-        except Exception:
-            pass
+            import shutil
+            out_path = f"/tmp/panel_banner_{user_id}.png"
+            shutil.copy2(base_path, out_path)
+            return out_path
+        except Exception as e2:
+            logging.warning("panel banner copy: %s", e2)
+            return base_path if os.path.exists(base_path) else None
 
 
 
