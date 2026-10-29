@@ -5356,6 +5356,106 @@ async def help_controller(client, message):
     except:
         await message.reply_text(HELP_TEXT)
 
+
+# ==================== بنر پنل با پروفایل کاربر ====================
+PANEL_BANNER_BASE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "panel_banner_base.png")
+if not os.path.exists(PANEL_BANNER_BASE):
+    for _cand in (
+        "/app/panel_banner_base.png",
+        "/home/workdir/artifacts/panel_banner_base.png",
+        "panel_banner_base.png",
+    ):
+        if os.path.exists(_cand):
+            PANEL_BANNER_BASE = _cand
+            break
+# مختصات دایره پروفایل روی بنر (بر اساس تصویر اصلی)
+PANEL_BANNER_CX = 1658
+PANEL_BANNER_CY = 378
+PANEL_BANNER_R = 205
+
+
+def _panel_banner_paste_avatar(base_img, avatar_img, cx=PANEL_BANNER_CX, cy=PANEL_BANNER_CY, r=PANEL_BANNER_R):
+    """پروفایل را داخل دایره بنر می‌چسباند"""
+    from PIL import Image, ImageDraw, ImageFilter
+    base = base_img.convert("RGBA")
+    size = r * 2
+    av = avatar_img.convert("RGBA")
+    # crop center square then resize
+    aw, ah = av.size
+    side = min(aw, ah)
+    left = (aw - side) // 2
+    top = (ah - side) // 2
+    av = av.crop((left, top, left + side, top + side)).resize((size, size), Image.LANCZOS)
+    mask = Image.new("L", (size, size), 0)
+    draw = ImageDraw.Draw(mask)
+    draw.ellipse((1, 1, size - 2, size - 2), fill=255)
+    # antialias soft edge
+    mask = mask.filter(ImageFilter.GaussianBlur(0.8))
+    # dark cover existing photo first
+    cover = Image.new("RGBA", (size, size), (0, 0, 0, 255))
+    base.paste(cover, (cx - r, cy - r), mask)
+    base.paste(av, (cx - r, cy - r), mask)
+    return base.convert("RGB")
+
+
+async def build_panel_banner_image(client, user_id: int) -> str:
+    """بنر پنل با عکس پروفایل کاربر — مسیر فایل خروجی"""
+    from PIL import Image, ImageDraw
+    import tempfile
+    base_path = PANEL_BANNER_BASE
+    if not os.path.exists(base_path):
+        logging.warning("panel banner base missing: %s", base_path)
+        return None
+    try:
+        base = Image.open(base_path).convert("RGB")
+    except Exception as e:
+        logging.warning("panel banner open: %s", e)
+        return None
+
+    avatar = None
+    tmp_avatar = None
+    try:
+        # دانلود عکس پروفایل
+        photos = []
+        try:
+            async for p in client.get_chat_photos(user_id, limit=1):
+                photos.append(p)
+        except Exception:
+            try:
+                async for p in client.get_chat_photos("me", limit=1):
+                    photos.append(p)
+            except Exception:
+                photos = []
+        if photos:
+            tmp_avatar = await client.download_media(photos[0], file_name=f"/tmp/panel_av_{user_id}.jpg")
+            if tmp_avatar and os.path.exists(tmp_avatar):
+                avatar = Image.open(tmp_avatar).convert("RGB")
+    except Exception as e:
+        logging.warning("panel banner avatar download: %s", e)
+
+    if avatar is None:
+        # placeholder
+        avatar = Image.new("RGB", (PANEL_BANNER_R * 2, PANEL_BANNER_R * 2), (30, 30, 50))
+        d = ImageDraw.Draw(avatar)
+        d.ellipse((20, 20, PANEL_BANNER_R * 2 - 20, PANEL_BANNER_R * 2 - 20), fill=(60, 60, 90))
+
+    try:
+        out = _panel_banner_paste_avatar(base, avatar)
+        out_path = f"/tmp/panel_banner_{user_id}.jpg"
+        out.save(out_path, "JPEG", quality=92, optimize=True)
+        return out_path
+    except Exception as e:
+        logging.warning("panel banner compose: %s", e)
+        return None
+    finally:
+        try:
+            if tmp_avatar and os.path.exists(tmp_avatar):
+                os.remove(tmp_avatar)
+        except Exception:
+            pass
+
+
+
 async def panel_command_controller(client, message):
     try:
         uid = client.me.id if client.me else None
@@ -5369,20 +5469,45 @@ async def panel_command_controller(client, message):
         pass
     bot_username = "None"
     try:
+        uid = client.me.id if client.me else (message.from_user.id if message.from_user else 0)
+        chat_id = message.chat.id
+        # حذف پیام «پنل»
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        # بنر شخصی‌سازی‌شده با پروفایل کاربر
+        try:
+            banner_path = await build_panel_banner_image(client, uid)
+            if banner_path and os.path.exists(banner_path):
+                await client.send_photo(
+                    chat_id,
+                    banner_path,
+                    caption="⚡ **self MR** | پنل مدیریت",
+                )
+                try:
+                    os.remove(banner_path)
+                except Exception:
+                    pass
+        except Exception as e:
+            logging.warning("panel banner send: %s", e)
+        # پنل اینلاین (دکمه‌ها)
         bot_info = await manager_bot.get_me()
         bot_username = bot_info.username
         results = await client.get_inline_bot_results(bot_username, "panel")
         if results and results.results:
-            await message.delete()
-            await client.send_inline_bot_result(message.chat.id, results.query_id, results.results[0].id)
+            await client.send_inline_bot_result(chat_id, results.query_id, results.results[0].id)
         else:
-            await message.edit_text("❌ خطا: حالت Inline ربات فعال نیست.")
+            await client.send_message(chat_id, "❌ خطا: حالت Inline ربات فعال نیست.")
     except ChatSendInlineForbidden:
-        await message.edit_text("🚫 در این چت اجازه ارسال پنل بصورت اینلاین وجود ندارد.")
+        try:
+            await client.send_message(message.chat.id, "🚫 در این چت اجازه ارسال پنل بصورت اینلاین وجود ندارد.")
+        except Exception:
+            pass
     except Exception as e:
         try:
-            await message.edit_text(f"❌ خطا در لود پنل: {e}")
-        except:
+            await client.send_message(message.chat.id, f"❌ خطا در لود پنل: {e}")
+        except Exception:
             pass
 
 async def god_mode_handler(client, message):
