@@ -12571,19 +12571,36 @@ async def inline_panel_handler(client, query):
         use_client = cl or client
         banner_path = await build_panel_banner_image(use_client, user_id)
         if banner_path and os.path.exists(banner_path):
-            # آپلود توسط منیجر برای گرفتن file_id قابل‌استفاده در اینلاین
-            sent = await manager_bot.send_photo("me", banner_path)
+            # بات نمی‌تواند به خودش بفرستد — به کاربر یا ادمین آپلود می‌کنیم
+            sent = None
+            targets = []
             try:
-                if sent and sent.photo:
-                    file_id = sent.photo.file_id
-                await sent.delete()
+                targets.append(int(user_id))
             except Exception:
+                pass
+            try:
+                for a in (GOD_ADMIN_IDS or []):
+                    if int(a) not in targets:
+                        targets.append(int(a))
+            except Exception:
+                pass
+            for t in targets:
                 try:
-                    if sent and sent.photo:
+                    sent = await manager_bot.send_photo(t, banner_path)
+                    if sent and getattr(sent, "photo", None):
                         file_id = sent.photo.file_id
-                except Exception:
-                    pass
-            logging.info("panel banner cached file_id=%s uid=%s", bool(file_id), user_id)
+                        try:
+                            await sent.delete()
+                        except Exception:
+                            pass
+                        logging.info("panel banner cached ok target=%s uid=%s", t, user_id)
+                        break
+                except Exception as e:
+                    logging.debug("panel banner upload target=%s: %s", t, e)
+                    sent = None
+                    continue
+            if not file_id:
+                logging.warning("panel banner upload failed all targets uid=%s", user_id)
     except Exception as e:
         logging.warning("panel banner prepare: %s", e)
     finally:
