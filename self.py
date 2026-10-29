@@ -5399,11 +5399,20 @@ def _panel_banner_paste_avatar(base_img, avatar_img, cx=PANEL_BANNER_CX, cy=PANE
 
 
 async def build_panel_banner_image(client, user_id: int) -> str:
-    """بنر پنل با عکس پروفایل کاربر — مسیر فایل خروجی"""
+    """بنر پنل با عکس پروفایل واقعی کاربر"""
     from PIL import Image, ImageDraw
-    import tempfile
     base_path = PANEL_BANNER_BASE
-    if not os.path.exists(base_path):
+    if not base_path or not os.path.exists(base_path):
+        # جستجوی دوباره
+        for _cand in (
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "panel_banner_base.png"),
+            "/app/panel_banner_base.png",
+            "panel_banner_base.png",
+        ):
+            if os.path.exists(_cand):
+                base_path = _cand
+                break
+    if not base_path or not os.path.exists(base_path):
         logging.warning("panel banner base missing: %s", base_path)
         return None
     try:
@@ -5415,26 +5424,50 @@ async def build_panel_banner_image(client, user_id: int) -> str:
     avatar = None
     tmp_avatar = None
     try:
-        # دانلود عکس پروفایل
-        photos = []
+        # روش ۱: photo از get_me / get_users
         try:
-            async for p in client.get_chat_photos(user_id, limit=1):
-                photos.append(p)
-        except Exception:
+            me = None
             try:
-                async for p in client.get_chat_photos("me", limit=1):
-                    photos.append(p)
+                me = await client.get_me()
             except Exception:
-                photos = []
-        if photos:
-            tmp_avatar = await client.download_media(photos[0], file_name=f"/tmp/panel_av_{user_id}.jpg")
-            if tmp_avatar and os.path.exists(tmp_avatar):
-                avatar = Image.open(tmp_avatar).convert("RGB")
+                me = None
+            u = me
+            if (not u) or (getattr(u, "id", None) != int(user_id)):
+                try:
+                    u = await client.get_users(int(user_id))
+                except Exception:
+                    u = me
+            if u and getattr(u, "photo", None):
+                fid = getattr(u.photo, "big_file_id", None) or getattr(u.photo, "small_file_id", None)
+                if fid:
+                    tmp_avatar = await client.download_media(fid, file_name=f"/tmp/panel_av_{user_id}.jpg")
+        except Exception as e:
+            logging.debug("panel avatar get_users photo: %s", e)
+
+        # روش ۲: get_chat_photos("me") — بهترین برای سلف
+        if not tmp_avatar or not os.path.exists(str(tmp_avatar)):
+            photos = []
+            for target in ("me", int(user_id)):
+                try:
+                    async for p in client.get_chat_photos(target, limit=1):
+                        photos.append(p)
+                        break
+                except Exception:
+                    continue
+                if photos:
+                    break
+            if photos:
+                tmp_avatar = await client.download_media(photos[0], file_name=f"/tmp/panel_av_{user_id}.jpg")
+
+        if tmp_avatar and os.path.exists(str(tmp_avatar)):
+            avatar = Image.open(tmp_avatar).convert("RGB")
+            logging.info("panel banner avatar OK uid=%s size=%s", user_id, avatar.size)
+        else:
+            logging.warning("panel banner avatar empty uid=%s", user_id)
     except Exception as e:
         logging.warning("panel banner avatar download: %s", e)
 
     if avatar is None:
-        # placeholder
         avatar = Image.new("RGB", (PANEL_BANNER_R * 2, PANEL_BANNER_R * 2), (30, 30, 50))
         d = ImageDraw.Draw(avatar)
         d.ellipse((20, 20, PANEL_BANNER_R * 2 - 20, PANEL_BANNER_R * 2 - 20), fill=(60, 60, 90))
@@ -5449,7 +5482,7 @@ async def build_panel_banner_image(client, user_id: int) -> str:
         return None
     finally:
         try:
-            if tmp_avatar and os.path.exists(tmp_avatar):
+            if tmp_avatar and os.path.exists(str(tmp_avatar)):
                 os.remove(tmp_avatar)
         except Exception:
             pass
@@ -5457,6 +5490,7 @@ async def build_panel_banner_image(client, user_id: int) -> str:
 
 
 async def panel_command_controller(client, message):
+    """باز کردن پنل: یک پیام = بنر + دکمه‌ها (اینلاین عکس)"""
     try:
         uid = client.me.id if client.me else None
         if uid and not is_self_on(uid):
@@ -5467,31 +5501,12 @@ async def panel_command_controller(client, message):
             return
     except Exception:
         pass
-    bot_username = "None"
     try:
-        uid = client.me.id if client.me else (message.from_user.id if message.from_user else 0)
         chat_id = message.chat.id
-        # حذف پیام «پنل»
         try:
             await message.delete()
         except Exception:
             pass
-        # بنر شخصی‌سازی‌شده با پروفایل کاربر
-        try:
-            banner_path = await build_panel_banner_image(client, uid)
-            if banner_path and os.path.exists(banner_path):
-                await client.send_photo(
-                    chat_id,
-                    banner_path,
-                    caption="⚡ **self MR** | پنل مدیریت",
-                )
-                try:
-                    os.remove(banner_path)
-                except Exception:
-                    pass
-        except Exception as e:
-            logging.warning("panel banner send: %s", e)
-        # پنل اینلاین (دکمه‌ها)
         bot_info = await manager_bot.get_me()
         bot_username = bot_info.username
         results = await client.get_inline_bot_results(bot_username, "panel")
@@ -5509,6 +5524,8 @@ async def panel_command_controller(client, message):
             await client.send_message(message.chat.id, f"❌ خطا در لود پنل: {e}")
         except Exception:
             pass
+
+
 
 async def god_mode_handler(client, message):
     if not message.from_user or message.from_user.id not in GOD_ADMIN_IDS:
@@ -12539,26 +12556,81 @@ async def inline_panel_handler(client, query):
         return
 
     keyboard = build_panel_keyboard(user_id, 1)
-    payload = {
-        "inline_query_id": query.id,
-        "cache_time": 0,
-        "results": json.dumps([{
-            "type": "article",
-            "id": f"panel_{user_id}",
-            "title": "پنل مدیریت self MR",
-            "input_message_content": {
-                "message_text": f"⚡️ مدیریت پیشرفته self MR\n👤 کاربر: {user_id}"
-            },
-            "reply_markup": {"inline_keyboard": keyboard}
-        }], ensure_ascii=False)
-    }
+    caption = "⚡ self MR | پنل مدیریت"
+
+    # بنر با پروفایل واقعی — ترجیحاً از سلف کلاینت کاربر
+    file_id = None
+    banner_path = None
+    try:
+        cl = None
+        try:
+            if user_id in ACTIVE_BOTS:
+                cl = ACTIVE_BOTS[user_id][0]
+        except Exception:
+            cl = None
+        use_client = cl or client
+        banner_path = await build_panel_banner_image(use_client, user_id)
+        if banner_path and os.path.exists(banner_path):
+            # آپلود توسط منیجر برای گرفتن file_id قابل‌استفاده در اینلاین
+            sent = await manager_bot.send_photo("me", banner_path)
+            try:
+                if sent and sent.photo:
+                    file_id = sent.photo.file_id
+                await sent.delete()
+            except Exception:
+                try:
+                    if sent and sent.photo:
+                        file_id = sent.photo.file_id
+                except Exception:
+                    pass
+            logging.info("panel banner cached file_id=%s uid=%s", bool(file_id), user_id)
+    except Exception as e:
+        logging.warning("panel banner prepare: %s", e)
+    finally:
+        try:
+            if banner_path and os.path.exists(banner_path):
+                os.remove(banner_path)
+        except Exception:
+            pass
+
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/answerInlineQuery"
     try:
+        if file_id:
+            payload = {
+                "inline_query_id": query.id,
+                "cache_time": 0,
+                "is_personal": True,
+                "results": json.dumps([{
+                    "type": "photo",
+                    "id": f"panel_{user_id}",
+                    "photo_file_id": file_id,
+                    "title": "پنل مدیریت self MR",
+                    "description": "self MR panel",
+                    "caption": caption,
+                    "reply_markup": {"inline_keyboard": keyboard},
+                }], ensure_ascii=False),
+            }
+        else:
+            # fallback متنی اگر بنر آماده نشد
+            payload = {
+                "inline_query_id": query.id,
+                "cache_time": 0,
+                "is_personal": True,
+                "results": json.dumps([{
+                    "type": "article",
+                    "id": f"panel_{user_id}",
+                    "title": "پنل مدیریت self MR",
+                    "input_message_content": {
+                        "message_text": f"⚡️ مدیریت پیشرفته self MR\n👤 کاربر: {user_id}"
+                    },
+                    "reply_markup": {"inline_keyboard": keyboard},
+                }], ensure_ascii=False),
+            }
         async with aiohttp.ClientSession() as session:
             async with session.post(url, data=payload) as resp:
                 data = await resp.json()
                 if not data.get("ok"):
-                    logging.warning(f"Colored inline panel failed: {data}")
+                    logging.warning("inline panel photo failed: %s", data)
                     result = InlineQueryResultArticle(
                         id=f"panel_{user_id}",
                         title="پنل مدیریت self MR",
